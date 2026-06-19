@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  base: '/top-stock-portfolio/',
   server: {
     proxy: {
       // 代理 TWSE 一般 API (有 CORS 限制的)
