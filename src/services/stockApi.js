@@ -21,6 +21,22 @@ const PE_DELAY_MS = 800;       // PE API 間隔（資料量小）
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ==================== 環境偵測 ====================
+const isProd = typeof window !== 'undefined' &&
+  window.location.hostname !== 'localhost' &&
+  window.location.hostname !== '127.0.0.1';
+
+// 生產環境用 corsproxy.io 繞過 CORS；開發環境用 Vite proxy
+const twseUrl = (path) => isProd
+  ? `https://corsproxy.io/?url=${encodeURIComponent('https://www.twse.com.tw' + path)}`
+  : `/twse${path}`;
+
+const twseOpenUrl = (path) => isProd
+  ? `https://corsproxy.io/?url=${encodeURIComponent('https://openapi.twse.com.tw' + path)}`
+  : `/twse-open${path}`;
+
+
+
 // ==================== 緩存工具 ====================
 const getCache = (type, symbol) => {
   const raw = localStorage.getItem(`${CACHE_PREFIX}${type}_${symbol}`);
@@ -44,7 +60,7 @@ const setCache = (type, symbol, data) => {
  */
 const fetchMonthPriceFromTWSE = async (symbol, year, month) => {
   const dateStr = `${year}${String(month).padStart(2, '0')}01`;
-  const url = `/twse/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${symbol}`;
+  const url = twseUrl(`/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${symbol}`);
 
   try {
     const resp = await fetch(url);
@@ -130,7 +146,7 @@ export const fetchPriceHistory = async (symbol) => {
  */
 const fetchMonthPEFromTWSE = async (symbol, year, month) => {
   const dateStr = `${year}${String(month).padStart(2, '0')}01`;
-  const url = `/twse/exchangeReport/BWIBBU?response=json&date=${dateStr}&stockNo=${symbol}`;
+  const url = twseUrl(`/exchangeReport/BWIBBU?response=json&date=${dateStr}&stockNo=${symbol}`);
 
   try {
     const resp = await fetch(url);
@@ -205,58 +221,67 @@ export const fetchPEHistory = async (symbol) => {
  * 此 API 回傳所有公司歷年資料，故只需抓一次並全量緩存。
  */
 export const fetchDividendHistory = async (symbol) => {
-  const DIVIDEND_CACHE_KEY = 'all_dividends_v2';
-  const DIVIDEND_CACHE_DATE_KEY = 'all_dividends_date_v2';
+  const CACHE_KEY = `${CACHE_PREFIX}dividend_${symbol}`;
+  const CACHE_DATE_KEY = `${CACHE_PREFIX}dividend_date_${symbol}`;
 
-  const cachedDate = localStorage.getItem(DIVIDEND_CACHE_DATE_KEY);
+  const cachedDate = localStorage.getItem(CACHE_DATE_KEY);
   const today = new Date().toISOString().split('T')[0];
-  let allDividends = null;
+  let cachedData = null;
 
-  // 如果今天已抓過就直接用 cache
-  if (cachedDate !== today) {
-    try {
-      const resp = await fetch('/twse-open/v1/opendata/t187ap45_L');
-      if (resp.ok) {
-        const json = await resp.json();
-        if (Array.isArray(json)) {
-          allDividends = json;
-          localStorage.setItem(DIVIDEND_CACHE_KEY, JSON.stringify(json));
-          localStorage.setItem(DIVIDEND_CACHE_DATE_KEY, today);
-        }
+  if (cachedDate === today) {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) {
+      try {
+        cachedData = JSON.parse(raw);
+      } catch {
+        cachedData = null;
       }
-    } catch (e) {
-      console.error('fetchDividendHistory error:', e);
     }
   }
 
-  if (!allDividends) {
-    const raw = localStorage.getItem(DIVIDEND_CACHE_KEY);
-    allDividends = raw ? JSON.parse(raw) : [];
+  let dividendList = cachedData;
+
+  if (!dividendList) {
+    try {
+      const startYear = new Date().getFullYear() - 10;
+      const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockDividend&data_id=${symbol}&start_date=${startYear}-01-01`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json.status === 200 && Array.isArray(json.data)) {
+          dividendList = json.data;
+          localStorage.setItem(CACHE_KEY, JSON.stringify(dividendList));
+          localStorage.setItem(CACHE_DATE_KEY, today);
+        }
+      }
+    } catch (e) {
+      console.error('fetchDividendHistory FinMind error:', e);
+    }
   }
 
-  // 過濾該股票，欄位: 公司代號, 股利年度, 現金股利(元/股), 股票股利(元/股) 等
-  const filtered = allDividends.filter((d) => d['公司代號'] === symbol);
+  if (!dividendList) {
+    dividendList = [];
+  }
 
   // 聚合為年度資料
   const yearMap = {};
-  filtered.forEach((row) => {
-    const year = parseInt(row['股利年度']);
-    if (!year || isNaN(year)) return;
-    const fullYear = year < 1000 ? year + 1911 : year; // 民國轉西元
+  dividendList.forEach((row) => {
+    const match = row.year ? row.year.match(/(\d+)年/) : null;
+    if (!match) return;
+    const minguoYear = parseInt(match[1]);
+    const fullYear = minguoYear + 1911;
 
     if (!yearMap[fullYear]) {
       yearMap[fullYear] = { year: fullYear, cashDividend: 0, stockDividend: 0 };
     }
 
     const cashPerShare =
-      parseFloat(row['股東配發-盈餘分配之現金(股利)(元/股)'] || 0) +
-      parseFloat(row['股東配發-法定盈餘公積發放之現金(元/股)'] || 0) +
-      parseFloat(row['股東配發-資本公積發放之現金(元/股)'] || 0);
+      parseFloat(row.CashEarningsDistribution || 0) +
+      parseFloat(row.CashStatutorySurplus || 0);
 
     const stockPerShare =
-      parseFloat(row['股東配發-盈餘轉增資配股(元/股)'] || 0) +
-      parseFloat(row['股東配發-法定盈餘公積轉增資配股(元/股)'] || 0) +
-      parseFloat(row['股東配發-資本公積轉增資配股(元/股)'] || 0);
+      parseFloat(row.StockEarningsDistribution || 0) +
+      parseFloat(row.StockStatutorySurplus || 0);
 
     yearMap[fullYear].cashDividend += isNaN(cashPerShare) ? 0 : cashPerShare;
     yearMap[fullYear].stockDividend += isNaN(stockPerShare) ? 0 : stockPerShare;
@@ -293,7 +318,7 @@ export const fetchStockName = async (symbol) => {
 
   // 嘗試查詢當月份個股日成交資訊
   let dateStr = `${year}${String(month).padStart(2, '0')}01`;
-  let url = `/twse/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`;
+  let url = twseUrl(`/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`);
 
   try {
     let resp = await fetch(url);
@@ -305,7 +330,7 @@ export const fetchStockName = async (symbol) => {
       const prevMonth = month === 1 ? 12 : month - 1;
       const prevYear = month === 1 ? year - 1 : year;
       dateStr = `${prevYear}${String(prevMonth).padStart(2, '0')}01`;
-      url = `/twse/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`;
+      url = twseUrl(`/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`);
       resp = await fetch(url);
       if (!resp.ok) return null;
       json = await resp.json();
