@@ -216,30 +216,32 @@ export const fetchPEHistory = async (symbol) => {
 
 // ==================== 配息資料 ====================
 /**
- * 從 TWSE OpenAPI 抓取全部上市公司的配息資料，
- * 然後過濾出指定股票代號的資料。
- * 此 API 回傳所有公司歷年資料，故只需抓一次並全量緩存。
+ * 從 FinMind API 抓取指定股票的歷年配息資料。
+ * - FinMind TaiwanStockDividend 支援 CORS，無需代理
+ * - 快取策略：成功抓到非空資料才快取；當日已快取則直接讀取
  */
 export const fetchDividendHistory = async (symbol) => {
   const CACHE_KEY = `${CACHE_PREFIX}dividend_${symbol}`;
   const CACHE_DATE_KEY = `${CACHE_PREFIX}dividend_date_${symbol}`;
 
-  const cachedDate = localStorage.getItem(CACHE_DATE_KEY);
   const today = new Date().toISOString().split('T')[0];
-  let cachedData = null;
+  const cachedDate = localStorage.getItem(CACHE_DATE_KEY);
+  let dividendList = null;
 
+  // 只有當日快取且資料非空才使用
   if (cachedDate === today) {
     const raw = localStorage.getItem(CACHE_KEY);
     if (raw) {
       try {
-        cachedData = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          dividendList = parsed;
+        }
       } catch {
-        cachedData = null;
+        // 快取損毀，重新抓取
       }
     }
   }
-
-  let dividendList = cachedData;
 
   if (!dividendList) {
     try {
@@ -248,8 +250,9 @@ export const fetchDividendHistory = async (symbol) => {
       const resp = await fetch(url);
       if (resp.ok) {
         const json = await resp.json();
-        if (json.status === 200 && Array.isArray(json.data)) {
+        if (json.status === 200 && Array.isArray(json.data) && json.data.length > 0) {
           dividendList = json.data;
+          // 只有成功取得資料才寫入快取
           localStorage.setItem(CACHE_KEY, JSON.stringify(dividendList));
           localStorage.setItem(CACHE_DATE_KEY, today);
         }
@@ -259,37 +262,51 @@ export const fetchDividendHistory = async (symbol) => {
     }
   }
 
-  if (!dividendList) {
-    dividendList = [];
-  }
+  if (!dividendList || dividendList.length === 0) return [];
 
   // 聚合為年度資料
+  // FinMind year 欄位格式: "103年" (民國年) → 加 1911 = 西元年
+  // 備用：若 year 欄位解析失敗，用 date 欄位（除權日）的西元年
+  const currentYear = new Date().getFullYear();
+  const startYear = currentYear - 9;
   const yearMap = {};
+
   dividendList.forEach((row) => {
-    const match = row.year ? row.year.match(/(\d+)年/) : null;
-    if (!match) return;
-    const minguoYear = parseInt(match[1]);
-    const fullYear = minguoYear + 1911;
+    let fullYear = null;
+
+    // 優先用 year 欄位（民國年）
+    if (row.year) {
+      const m = String(row.year).match(/(\d+)/);
+      if (m) {
+        const n = parseInt(m[1]);
+        fullYear = n < 200 ? n + 1911 : n; // 民國年 < 200，西元年 >= 1911
+      }
+    }
+
+    // 備用：用除權日的西元年
+    if (!fullYear && row.date) {
+      fullYear = parseInt(String(row.date).substring(0, 4));
+    }
+
+    if (!fullYear || fullYear < startYear || fullYear > currentYear) return;
 
     if (!yearMap[fullYear]) {
       yearMap[fullYear] = { year: fullYear, cashDividend: 0, stockDividend: 0 };
     }
 
-    const cashPerShare =
+    const cash =
       parseFloat(row.CashEarningsDistribution || 0) +
       parseFloat(row.CashStatutorySurplus || 0);
 
-    const stockPerShare =
+    const stock =
       parseFloat(row.StockEarningsDistribution || 0) +
       parseFloat(row.StockStatutorySurplus || 0);
 
-    yearMap[fullYear].cashDividend += isNaN(cashPerShare) ? 0 : cashPerShare;
-    yearMap[fullYear].stockDividend += isNaN(stockPerShare) ? 0 : stockPerShare;
+    yearMap[fullYear].cashDividend += isNaN(cash) ? 0 : cash;
+    yearMap[fullYear].stockDividend += isNaN(stock) ? 0 : stock;
   });
 
-  const currentYear = new Date().getFullYear();
   return Object.values(yearMap)
-    .filter((d) => d.year >= currentYear - 9 && d.year <= currentYear)
     .map((d) => ({
       ...d,
       cashDividend: parseFloat(d.cashDividend.toFixed(2)),
