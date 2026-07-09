@@ -26,17 +26,20 @@ const isProd = typeof window !== 'undefined' &&
   window.location.hostname !== 'localhost' &&
   window.location.hostname !== '127.0.0.1';
 
-// 生產環境用 corsproxy.io 繞過 CORS；開發環境用 Vite proxy
+// 生產環境：openapi.twse.com.tw 與 tpex.org.tw/openapi 原生支援 CORS，可直接存取。
+// 非 OpenAPI 的 TWSE 歷史資料端點才需要 corsproxy.io 中繼。
 const twseUrl = (path) => isProd
   ? `https://corsproxy.io/?url=${encodeURIComponent('https://www.twse.com.tw' + path)}`
   : `/twse${path}`;
 
+// TWSE OpenAPI (openapi.twse.com.tw) 原生支援 CORS，直接存取即可
 const twseOpenUrl = (path) => isProd
-  ? `https://corsproxy.io/?url=${encodeURIComponent('https://openapi.twse.com.tw' + path)}`
+  ? `https://openapi.twse.com.tw${path}`
   : `/twse-open${path}`;
 
+// TPEX OpenAPI (tpex.org.tw/openapi) 原生支援 CORS，直接存取即可
 const tpexUrl = (path) => isProd
-  ? `https://corsproxy.io/?url=${encodeURIComponent('https://www.tpex.org.tw' + path)}`
+  ? `https://www.tpex.org.tw${path}`
   : `/tpex${path}`;
 
 
