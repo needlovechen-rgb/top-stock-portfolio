@@ -35,6 +35,10 @@ const twseOpenUrl = (path) => isProd
   ? `https://corsproxy.io/?url=${encodeURIComponent('https://openapi.twse.com.tw' + path)}`
   : `/twse-open${path}`;
 
+const tpexUrl = (path) => isProd
+  ? `https://corsproxy.io/?url=${encodeURIComponent('https://www.tpex.org.tw' + path)}`
+  : `/tpex${path}`;
+
 
 
 // ==================== 緩存工具 ====================
@@ -106,27 +110,90 @@ export const fetchPriceHistory = async (symbol) => {
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth() + 1;
 
-  const monthsToFetch = [];
+  // 計算預期需要的 YYYY-MM 清單 (近 10 年，不包含當前進行中的月份)
+  const expectedKeys = [];
   for (let y = currentYear - 9; y <= currentYear; y++) {
-    const maxMonth = y === currentYear ? currentMonth - 1 : 12; // 當月還未結束跳過
+    const maxMonth = y === currentYear ? currentMonth - 1 : 12;
     for (let m = 1; m <= maxMonth; m++) {
-      const key = `${y}-${String(m).padStart(2, '0')}`;
-      if (!cachedData[key]) {
-        monthsToFetch.push({ year: y, month: m, key });
-      }
+      expectedKeys.push(`${y}-${String(m).padStart(2, '0')}`);
     }
   }
 
-  if (monthsToFetch.length > 0) {
-    console.log(`[${symbol}] 股價需抓取 ${monthsToFetch.length} 個月份的資料...`);
+  // 檢查是否缺任何月份的資料
+  const missingKeys = expectedKeys.filter((k) => !cachedData[k]);
+
+  if (missingKeys.length > 0) {
+    console.log(`[${symbol}] 股價快取不完整，嘗試從 FinMind 抓取 10 年日股價...`);
+    try {
+      const startYear = currentYear - 10;
+      const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${startYear}-01-01`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json.status === 200 && Array.isArray(json.data) && json.data.length > 0) {
+          const monthlyMap = {};
+          json.data.forEach((row) => {
+            const ym = row.date.substring(0, 7);
+            const [yStr, mStr] = ym.split('-');
+            const year = parseInt(yStr);
+            const monthNum = parseInt(mStr);
+
+            if (!monthlyMap[ym]) {
+              monthlyMap[ym] = {
+                date: ym,
+                year,
+                monthNum,
+                highs: [],
+                lows: [],
+                closes: [],
+              };
+            }
+            if (row.max !== undefined && row.max !== null) monthlyMap[ym].highs.push(row.max);
+            if (row.min !== undefined && row.min !== null) monthlyMap[ym].lows.push(row.min);
+            if (row.close !== undefined && row.close !== null) monthlyMap[ym].closes.push(row.close);
+          });
+
+          Object.entries(monthlyMap).forEach(([ym, m]) => {
+            if (m.highs.length > 0 && m.lows.length > 0 && m.closes.length > 0) {
+              const high = Math.max(...m.highs);
+              const low = Math.min(...m.lows);
+              const avg = parseFloat(
+                (m.closes.reduce((a, b) => a + b, 0) / m.closes.length).toFixed(2)
+              );
+              cachedData[ym] = {
+                date: ym,
+                year: m.year,
+                monthNum: m.monthNum,
+                high: parseFloat(high.toFixed(2)),
+                low: parseFloat(low.toFixed(2)),
+                avg,
+              };
+            }
+          });
+
+          setCache('price', symbol, cachedData);
+          console.log(`[${symbol}] FinMind 股價載入並聚合成功。`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[${symbol}] fetchPriceHistory FinMind failed, falling back to TWSE:`, e);
+    }
+  }
+
+  // Fallback: 如果 FinMind 失敗或未補滿，使用 TWSE 逐月抓取 (僅限上市股票)
+  const finalMissingKeys = expectedKeys.filter((k) => !cachedData[k]);
+  if (finalMissingKeys.length > 0) {
+    console.log(`[${symbol}] FinMind 未能填補所有資料，開始 Fallback 逐月向 TWSE 抓取剩餘的 ${finalMissingKeys.length} 個月資料...`);
     let saved = 0;
-    for (const { year, month, key } of monthsToFetch) {
+    for (const key of finalMissingKeys) {
+      const [yStr, mStr] = key.split('-');
+      const year = parseInt(yStr);
+      const month = parseInt(mStr);
       const result = await fetchMonthPriceFromTWSE(symbol, year, month);
       if (result) {
         cachedData[key] = result;
       }
       saved++;
-      // 每 12 筆儲存一次，避免中途中斷遺失資料
       if (saved % 12 === 0) {
         setCache('price', symbol, cachedData);
       }
@@ -135,7 +202,6 @@ export const fetchPriceHistory = async (symbol) => {
     setCache('price', symbol, cachedData);
   }
 
-  // 排序後回傳
   return Object.values(cachedData).sort((a, b) => a.date.localeCompare(b.date));
 };
 
@@ -184,20 +250,57 @@ export const fetchPEHistory = async (symbol) => {
   const cachedData = getCache('pe', symbol) || {};
 
   const currentYear = new Date().getFullYear();
-  const currentMonth = new Date().getMonth() + 1; // 1-12
-  const yearsToFetch = [];
-  for (let y = currentYear - 9; y < currentYear; y++) {
-    if (!cachedData[y]) {
-      yearsToFetch.push(y);
+  const currentMonth = new Date().getMonth() + 1;
+
+  // 檢查是否缺任何歷史年份的資料，或者需要更新當前年度
+  const expectedYears = [];
+  for (let y = currentYear - 9; y <= currentYear; y++) {
+    expectedYears.push(y);
+  }
+
+  // 只要缺歷史年份，或要重抓今年，就觸發抓取
+  const missingYears = expectedYears.filter((y) => !cachedData[y] || y === currentYear);
+
+  if (missingYears.length > 0) {
+    console.log(`[${symbol}] PE 快取不完整或需更新今年，嘗試從 FinMind 抓取 10 年本益比...`);
+    try {
+      const startYear = currentYear - 10;
+      const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPER&data_id=${symbol}&start_date=${startYear}-01-01`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json.status === 200 && Array.isArray(json.data) && json.data.length > 0) {
+          const yearlyMap = {};
+          json.data.forEach((row) => {
+            const year = parseInt(row.date.substring(0, 4));
+            if (year >= currentYear - 9 && year <= currentYear) {
+              yearlyMap[year] = {
+                year,
+                pe: row.PER <= 0 ? null : parseFloat(row.PER.toFixed(2)),
+                yield: parseFloat(row.dividend_yield.toFixed(2)),
+                pbr: parseFloat(row.PBR.toFixed(2)),
+              };
+            }
+          });
+
+          Object.entries(yearlyMap).forEach(([year, data]) => {
+            cachedData[year] = data;
+          });
+
+          setCache('pe', symbol, cachedData);
+          console.log(`[${symbol}] FinMind 本益比載入成功。`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[${symbol}] fetchPEHistory FinMind failed, falling back to TWSE:`, e);
     }
   }
-  // 當年度每次都重抓（更新最新 PE）
-  yearsToFetch.push(currentYear);
 
-  if (yearsToFetch.length > 0) {
-    console.log(`[${symbol}] PE 需抓取 ${yearsToFetch.length} 個年度...`);
-    for (const year of yearsToFetch) {
-      // 歷史年取 12 月，當年取上個月（若是 1 月就取 12 月份）
+  // Fallback: 如果仍然缺某些年份，或者 FinMind 失敗，則退回 TWSE 逐年抓取邏輯 (僅限上市股票)
+  const finalMissingYears = expectedYears.filter((y) => !cachedData[y] || y === currentYear);
+  if (finalMissingYears.length > 0) {
+    console.log(`[${symbol}] FinMind 未能填補所有 PE 資料，開始 Fallback 逐年向 TWSE 抓取剩餘的 ${finalMissingYears.length} 個年度資料...`);
+    for (const year of finalMissingYears) {
       const month = year === currentYear
         ? (currentMonth > 1 ? currentMonth - 1 : 12)
         : 12;
@@ -317,6 +420,7 @@ export const fetchDividendHistory = async (symbol) => {
 
 /**
  * 透過股票代號向 TWSE 查詢股票名稱
+ * 策略：本地表 → TWSE 上市清單 API → STOCK_DAY 當月 → STOCK_DAY 上月
  * @param {string} symbol - 股票代號
  * @returns {Promise<string|null>} 股票名稱或 null (查無此股票)
  */
@@ -324,48 +428,80 @@ export const fetchStockName = async (symbol) => {
   const cleanSymbol = symbol.trim();
   if (!cleanSymbol) return null;
 
-  // 1. 先從本地對照表查詢
+  // 1. 先從本地對照表查詢（最快）
   const localName = STOCK_NAME_MAP[cleanSymbol];
   if (localName) return localName;
 
-  // 2. 本地查無，向證交所 API 查詢名稱
+  // 2. 向 TWSE OpenAPI 查詢上市股票清單（有 CORS 支援）
+  try {
+    const listUrl = twseOpenUrl('/v1/opendata/t187ap47_L');
+    const listResp = await fetch(listUrl);
+    if (listResp.ok) {
+      const listJson = await listResp.json();
+      if (Array.isArray(listJson)) {
+        // 欄位格式：{ '有價證券代號': '2330', '有價證券名稱': '台積電', ... }
+        const found = listJson.find(
+          (item) => (item['有價證券代號'] || '').trim() === cleanSymbol
+        );
+        if (found) {
+          const name = (found['有價證券名稱'] || '').trim();
+          if (name) return name;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('fetchStockName list API failed, falling back:', e);
+  }
+
+  // 3. 向 TPEX OpenAPI 查詢上櫃股票清單（有 CORS 支援）
+  try {
+    const listUrl = tpexUrl('/openapi/v1/tpex_mainboard_quotes');
+    const listResp = await fetch(listUrl);
+    if (listResp.ok) {
+      const listJson = await listResp.json();
+      if (Array.isArray(listJson)) {
+        // 欄位格式：{ 'SecuritiesCompanyCode': '3390', 'CompanyName': '旭軟', ... }
+        const found = listJson.find(
+          (item) => (item['SecuritiesCompanyCode'] || '').trim() === cleanSymbol
+        );
+        if (found) {
+          const name = (found['CompanyName'] || '').trim();
+          if (name) return name;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('fetchStockName TPEX list API failed, falling back:', e);
+  }
+
+  // 3. 備用：向 TWSE STOCK_DAY 查詢（解析 title 欄位取得名稱）
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
 
-  // 嘗試查詢當月份個股日成交資訊
-  let dateStr = `${year}${String(month).padStart(2, '0')}01`;
-  let url = twseUrl(`/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`);
-
-  try {
-    let resp = await fetch(url);
-    if (!resp.ok) return null;
-    let json = await resp.json();
-
-    // 如果當期沒資料（例如月初尚未結算），嘗試抓上個月份
-    if (json.stat !== 'OK' || !json.title) {
-      const prevMonth = month === 1 ? 12 : month - 1;
-      const prevYear = month === 1 ? year - 1 : year;
-      dateStr = `${prevYear}${String(prevMonth).padStart(2, '0')}01`;
-      url = twseUrl(`/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`);
-      resp = await fetch(url);
+  const tryFetch = async (y, m) => {
+    const dateStr = `${y}${String(m).padStart(2, '0')}01`;
+    const url = twseUrl(`/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${cleanSymbol}`);
+    try {
+      const resp = await fetch(url);
       if (!resp.ok) return null;
-      json = await resp.json();
-    }
-
-    if (json.stat === 'OK' && json.title) {
-      // 解析 title 欄位，例如 "113年09月 2330 臺灣積體電路製造股份有限公司 各日成交資訊"
-      const title = json.title;
-      // 匹配 "XXXX 股票代號 公司名稱 各日成交資訊" 格式
-      const match = title.match(/\d+年\d+月\s+\d+\s+(.*?)\s*(?:各日成交資訊|個股日成交資訊|成交資訊|各日|$)/);
-      if (match && match[1]) {
-        return match[1].trim();
+      const json = await resp.json();
+      if (json.stat === 'OK' && json.title) {
+        const match = json.title.match(/\d+年\d+月\s+\d+\s+(.*?)\s*(?:各日成交資訊|個股日成交資訊|成交資訊|各日|$)/);
+        if (match && match[1]) return match[1].trim();
       }
-    }
+    } catch { /* ignore */ }
     return null;
-  } catch (e) {
-    console.error(`fetchStockName error (${cleanSymbol}):`, e);
-    return null;
-  }
+  };
+
+  // 當月
+  const name1 = await tryFetch(year, month);
+  if (name1) return name1;
+
+  // 上個月
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+  const name2 = await tryFetch(prevYear, prevMonth);
+  return name2 || null;
 };
 

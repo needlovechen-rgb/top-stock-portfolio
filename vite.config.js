@@ -19,6 +19,12 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/twse-open/, ''),
       },
+      // 代理 TPEX OpenAPI
+      '/tpex': {
+        target: 'https://www.tpex.org.tw',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/tpex/, ''),
+      },
     },
   },
 })
