@@ -412,6 +412,27 @@ export const fetchDividendHistory = async (symbol) => {
     yearMap[fullYear].stockDividend += isNaN(stock) ? 0 : stock;
   });
 
+  // 手動補充或修正尚未在 API 中更新的歷年股利資料
+  const DIVIDEND_OVERRIDES = {
+    '2812': {
+      2025: { cashDividend: 0.39, stockDividend: 0.67 }
+    }
+  };
+
+  const overrides = DIVIDEND_OVERRIDES[symbol];
+  if (overrides) {
+    Object.entries(overrides).forEach(([yr, val]) => {
+      const y = parseInt(yr);
+      if (y >= startYear && y <= currentYear) {
+        yearMap[y] = {
+          year: y,
+          cashDividend: val.cashDividend,
+          stockDividend: val.stockDividend
+        };
+      }
+    });
+  }
+
   return Object.values(yearMap)
     .map((d) => ({
       ...d,
