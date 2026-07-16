@@ -37,9 +37,9 @@ const twseOpenUrl = (path) => isProd
   ? `https://openapi.twse.com.tw${path}`
   : `/twse-open${path}`;
 
-// TPEX OpenAPI (tpex.org.tw/openapi) 原生支援 CORS，直接存取即可
+// TPEX OpenAPI: production 環境透過 corsproxy.io 代理（tpex.org.tw 不支援 github.io 的 CORS）
 const tpexUrl = (path) => isProd
-  ? `https://www.tpex.org.tw${path}`
+  ? `https://corsproxy.io/?url=${encodeURIComponent('https://www.tpex.org.tw' + path)}`
   : `/tpex${path}`;
 
 
