@@ -471,7 +471,27 @@ export const fetchStockName = async (symbol) => {
     console.warn('fetchStockName TWSE list API failed, falling back:', e);
   }
 
-  // 4. 向 TPEX OpenAPI 查詢上櫃股票清單
+  // 3.5 向 TWSE OpenAPI 查詢上櫃(OTC)股票清單（原生 CORS，不受市場開閉影響）
+  try {
+    const otcListUrl = twseOpenUrl('/v1/opendata/t187ap47_O');
+    const otcListResp = await fetch(otcListUrl);
+    if (otcListResp.ok) {
+      const otcListJson = await otcListResp.json();
+      if (Array.isArray(otcListJson)) {
+        const found = otcListJson.find(
+          (item) => (item['有價證券代號'] || '').trim() === cleanSymbol
+        );
+        if (found) {
+          const name = (found['有價證券名稱'] || '').trim();
+          if (name) return name;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('fetchStockName TWSE OTC list API failed, falling back:', e);
+  }
+
+  // 4. 向 TPEX OpenAPI 查詢上櫃股票行情（每日報價清單）
   try {
     const listUrl = tpexUrl('/openapi/v1/tpex_mainboard_quotes');
     const listResp = await fetch(listUrl);
@@ -482,13 +502,33 @@ export const fetchStockName = async (symbol) => {
           (item) => (item['SecuritiesCompanyCode'] || '').trim() === cleanSymbol
         );
         if (found) {
-          const name = (found['CompanyName'] || '').trim();
+          const name = (found['CompanyName'] || found['CompanyAbbreviation'] || '').trim();
           if (name) return name;
         }
       }
     }
   } catch (e) {
-    console.warn('fetchStockName TPEX list API failed, falling back:', e);
+    console.warn('fetchStockName TPEX quotes API failed, falling back:', e);
+  }
+
+  // 4.5 TPEX 備援：本益比分析端點（含股票名稱，不受交易時段限制）
+  try {
+    const peUrl = tpexUrl('/openapi/v1/tpex_mainboard_peratio_analysis');
+    const peResp = await fetch(peUrl);
+    if (peResp.ok) {
+      const peJson = await peResp.json();
+      if (Array.isArray(peJson)) {
+        const found = peJson.find(
+          (item) => (item['SecuritiesCompanyCode'] || '').trim() === cleanSymbol
+        );
+        if (found) {
+          const name = (found['CompanyName'] || found['CompanyAbbreviation'] || '').trim();
+          if (name) return name;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('fetchStockName TPEX peratio API failed, falling back:', e);
   }
 
   // 5. 最後備用：向 TWSE STOCK_DAY 查詢（僅限上市股票）
