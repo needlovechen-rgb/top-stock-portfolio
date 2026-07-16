@@ -422,8 +422,9 @@ export const fetchDividendHistory = async (symbol) => {
 };
 
 /**
- * 透過股票代號向 TWSE 查詢股票名稱
- * 策略：本地表 → TWSE 上市清單 API → STOCK_DAY 當月 → STOCK_DAY 上月
+ * 透過股票代號查詢股票名稱
+ * 策略：本地表 → FinMind TaiwanStockInfo（上市/上櫃皆支援，有 CORS）
+ *        → TWSE 上市清單 → TPEX 上櫃清單 → TWSE STOCK_DAY（備用）
  * @param {string} symbol - 股票代號
  * @returns {Promise<string|null>} 股票名稱或 null (查無此股票)
  */
@@ -435,14 +436,28 @@ export const fetchStockName = async (symbol) => {
   const localName = STOCK_NAME_MAP[cleanSymbol];
   if (localName) return localName;
 
-  // 2. 向 TWSE OpenAPI 查詢上市股票清單（有 CORS 支援）
+  // 2. FinMind TaiwanStockInfo：支援上市(twse)與上櫃(tpex)，原生 CORS，最穩定
+  try {
+    const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo&data_id=${cleanSymbol}`;
+    const resp = await fetch(url);
+    if (resp.ok) {
+      const json = await resp.json();
+      if (json.status === 200 && Array.isArray(json.data) && json.data.length > 0) {
+        const name = (json.data[0].stock_name || '').trim();
+        if (name) return name;
+      }
+    }
+  } catch (e) {
+    console.warn('fetchStockName FinMind failed, falling back:', e);
+  }
+
+  // 3. 向 TWSE OpenAPI 查詢上市股票清單（有 CORS 支援）
   try {
     const listUrl = twseOpenUrl('/v1/opendata/t187ap47_L');
     const listResp = await fetch(listUrl);
     if (listResp.ok) {
       const listJson = await listResp.json();
       if (Array.isArray(listJson)) {
-        // 欄位格式：{ '有價證券代號': '2330', '有價證券名稱': '台積電', ... }
         const found = listJson.find(
           (item) => (item['有價證券代號'] || '').trim() === cleanSymbol
         );
@@ -453,17 +468,16 @@ export const fetchStockName = async (symbol) => {
       }
     }
   } catch (e) {
-    console.warn('fetchStockName list API failed, falling back:', e);
+    console.warn('fetchStockName TWSE list API failed, falling back:', e);
   }
 
-  // 3. 向 TPEX OpenAPI 查詢上櫃股票清單（有 CORS 支援）
+  // 4. 向 TPEX OpenAPI 查詢上櫃股票清單
   try {
     const listUrl = tpexUrl('/openapi/v1/tpex_mainboard_quotes');
     const listResp = await fetch(listUrl);
     if (listResp.ok) {
       const listJson = await listResp.json();
       if (Array.isArray(listJson)) {
-        // 欄位格式：{ 'SecuritiesCompanyCode': '3390', 'CompanyName': '旭軟', ... }
         const found = listJson.find(
           (item) => (item['SecuritiesCompanyCode'] || '').trim() === cleanSymbol
         );
@@ -477,7 +491,7 @@ export const fetchStockName = async (symbol) => {
     console.warn('fetchStockName TPEX list API failed, falling back:', e);
   }
 
-  // 3. 備用：向 TWSE STOCK_DAY 查詢（解析 title 欄位取得名稱）
+  // 5. 最後備用：向 TWSE STOCK_DAY 查詢（僅限上市股票）
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
@@ -497,11 +511,9 @@ export const fetchStockName = async (symbol) => {
     return null;
   };
 
-  // 當月
   const name1 = await tryFetch(year, month);
   if (name1) return name1;
 
-  // 上個月
   const prevMonth = month === 1 ? 12 : month - 1;
   const prevYear = month === 1 ? year - 1 : year;
   const name2 = await tryFetch(prevYear, prevMonth);
